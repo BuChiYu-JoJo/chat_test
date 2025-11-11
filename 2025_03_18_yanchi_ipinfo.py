@@ -40,6 +40,7 @@ PROXY_TEMPLATE = "rmmsg2sa.{as_value}.thordata.net:9999"
 AUTH_TEMPLATE = "td-customer-GH43726-country-{af}:GH43726"
 
 REGIONS = ["na", "eu", "as"]  # 代理区域
+REQUESTS_PER_COUNTRY = 1000  # 每个国家的请求次数（可根据需要修改）
 CONCURRENCY = 50  # 并发线程数（降低以减少资源竞争，提高延迟测量准确性）
 CONNECT_TIMEOUT = 10  # 连接超时时间(秒)
 READ_TIMEOUT = 20  # 读取超时时间(秒)
@@ -336,7 +337,7 @@ def fetch_url_with_timeout():
     writer.start()
     monitor.start()
 
-    total_tasks = len(REGIONS) * len(guojia_values) * 1000
+    total_tasks = len(REGIONS) * len(guojia_values) * REQUESTS_PER_COUNTRY
     start_time = time.perf_counter()  # 使用高精度计时器
     
     # 速率限制相关变量
@@ -345,6 +346,7 @@ def fetch_url_with_timeout():
 
     print(f"\n开始测试...")
     print(f"总任务数: {total_tasks}")
+    print(f"每个国家请求次数: {REQUESTS_PER_COUNTRY}")
     print(f"并发数: {CONCURRENCY}")
     print(f"速率限制: {RATE_LIMIT if RATE_LIMIT > 0 else '无限制'} req/s")
     print(f"批次大小: {BATCH_SIZE}")
@@ -356,7 +358,7 @@ def fetch_url_with_timeout():
 
             for region in REGIONS:
                 for guojia in guojia_values:
-                    for _ in range(1000):
+                    for _ in range(REQUESTS_PER_COUNTRY):
                         # 速率限制
                         if rate_limiter_interval > 0:
                             current_time = time.perf_counter()

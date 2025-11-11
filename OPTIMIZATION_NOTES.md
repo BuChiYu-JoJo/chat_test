@@ -147,9 +147,29 @@ except Exception as e:
 
 ## 配置参数说明
 
+### 核心配置参数
+
+```python
+REQUESTS_PER_COUNTRY = 1000  # 每个国家的请求次数（新增配置）
+CONCURRENCY = 50             # 并发线程数
+RATE_LIMIT = 0               # 速率限制（0=不限制）
+BATCH_SIZE = 500             # CSV批量写入条数
+CONNECT_TIMEOUT = 10         # 连接超时
+READ_TIMEOUT = 20            # 读取超时
+```
+
+**REQUESTS_PER_COUNTRY**: Number of requests per country per region
+- Default: 1000
+- Example: 3 countries × 3 regions × 100 requests = 900 total requests
+- Recommendations:
+  - Quick test: 50-100
+  - Normal testing: 1000 (default)
+  - Precise measurement: 2000-5000
+
 ### 推荐配置（准确性优先）
 
 ```python
+REQUESTS_PER_COUNTRY = 2000  # 更多采样
 CONCURRENCY = 30          # 低并发，高准确性
 RATE_LIMIT = 40           # 启用速率限制
 BATCH_SIZE = 500          # 中等批次
@@ -160,6 +180,7 @@ READ_TIMEOUT = 20
 ### 平衡配置（准确性与效率兼顾）
 
 ```python
+REQUESTS_PER_COUNTRY = 1000  # 默认值
 CONCURRENCY = 50          # 当前默认值
 RATE_LIMIT = 0            # 不限制（依赖并发控制）
 BATCH_SIZE = 500
@@ -170,6 +191,7 @@ READ_TIMEOUT = 20
 ### 效率优先配置（不推荐用于精确测试）
 
 ```python
+REQUESTS_PER_COUNTRY = 100   # 减少请求
 CONCURRENCY = 100         # 高并发
 RATE_LIMIT = 0
 BATCH_SIZE = 2000
