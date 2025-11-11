@@ -10,6 +10,28 @@ import csv
 import datetime  # 新增日期模块
 
 # =====================
+# 优化说明
+# =====================
+# 版本: 已优化延迟测量准确性 (2025-11-11)
+# 
+# 主要优化点:
+# 1. 延迟测量精度优化:
+#    - 使用 time.perf_counter() 替代 time.time() 提高计时精度
+#    - 在响应接收完成后立即记录时间，JSON 解析不计入延迟
+#    - 每次请求使用独立 Session 对象，避免连接复用影响
+#    - 添加 Connection: close 头部防止 keep-alive 连接
+# 
+# 2. 性能优化（在不影响准确性的前提下）:
+#    - 降低默认并发数从 100 到 50，减少资源竞争
+#    - 添加可选的速率限制功能（RATE_LIMIT 参数）
+#    - 减小批次大小从 2000 到 500，提高数据实时性
+# 
+# 3. 错误处理增强:
+#    - 异常情况下也记录实际耗时
+#    - 关闭 session 释放资源防止泄漏
+# =====================
+
+# =====================
 # 全局配置区（可根据需要修改）
 # =====================
 URL = "https://ipinfo.io/json"
@@ -18,11 +40,12 @@ PROXY_TEMPLATE = "rmmsg2sa.{as_value}.thordata.net:9999"
 AUTH_TEMPLATE = "td-customer-GH43726-country-{af}:GH43726"
 
 REGIONS = ["na", "eu", "as"]  # 代理区域
-CONCURRENCY = 100  # 并发线程数
+CONCURRENCY = 50  # 并发线程数（降低以减少资源竞争，提高延迟测量准确性）
 CONNECT_TIMEOUT = 10  # 连接超时时间(秒)
 READ_TIMEOUT = 20  # 读取超时时间(秒)
-BATCH_SIZE = 2000  # CSV批量写入条数
+BATCH_SIZE = 500  # CSV批量写入条数（减小以提高实时性）
 MONITOR_INTERVAL = 30  # 监控刷新间隔(秒)
+RATE_LIMIT = 0  # 每秒请求速率限制（0表示不限制，建议值30-50以提高准确性）
 
 # 新增全局输出路径配置
 current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -143,7 +166,14 @@ def monitor_thread():
             print("=" * 50 + "\n")
 
 def _make_request(url, region, guojia, proxy_template, auth_template, timeout):
-    """执行单个请求（动态协议代理版本）并记录详细错误日志"""
+    """执行单个请求（动态协议代理版本）并记录详细错误日志
+    
+    优化说明：
+    1. 使用 time.perf_counter() 替代 time.time() 以提高计时精度
+    2. 在响应接收完成后立即记录时间，避免 JSON 解析影响延迟测量
+    3. 禁用会话复用，每次请求使用新的 Session 对象
+    4. 添加 Connection: close 头部防止连接保持
+    """
     try:
         protocol = "https" if url.startswith("https://") else "http"
         proxy_host = proxy_template.format(as_value=region)
@@ -155,12 +185,23 @@ def _make_request(url, region, guojia, proxy_template, auth_template, timeout):
             protocol: f"http://{auth_username}:{auth_password}@{proxy_host}"
         }
 
-        request_start_time = time.time()
-        response = requests.get(url, proxies=proxies, timeout=timeout)
-        request_end_time = time.time()
+        # 使用独立的 Session 对象并禁用连接池以确保每次都是新连接
+        session = requests.Session()
+        # 添加 Connection: close 头部防止 keep-alive
+        session.headers.update({'Connection': 'close'})
+        
+        # 使用高精度计时器
+        request_start_time = time.perf_counter()
+        response = session.get(url, proxies=proxies, timeout=timeout)
+        # 立即记录结束时间，在 JSON 解析之前
+        request_end_time = time.perf_counter()
         elapsed = (request_end_time - request_start_time) * 1000  # ms
+        
+        # 关闭 session 释放资源
+        session.close()
 
         if response.status_code == 200:
+            # JSON 解析不计入延迟测量
             data = response.json()
             return {
                 "region": region,
@@ -181,8 +222,12 @@ def _make_request(url, region, guojia, proxy_template, auth_template, timeout):
             }
 
     except requests.exceptions.Timeout:
-        error_message = f"请求超时，url: {url}, region: {region}, guojia: {guojia}, proxy: {proxy_host}"
+        elapsed = (time.perf_counter() - request_start_time) * 1000
+        error_message = f"请求超时，url: {url}, region: {region}, guojia: {guojia}, proxy: {proxy_host}, 耗时: {elapsed:.2f}ms"
         _log_error(error_message)
+        # 关闭 session（如果已创建）
+        if 'session' in locals():
+            session.close()
         return {
             "region": region,
             "请求国家": guojia,
@@ -191,8 +236,16 @@ def _make_request(url, region, guojia, proxy_template, auth_template, timeout):
             "延迟": "Timeout"
         }
     except Exception as e:
-        error_message = f"请求异常({type(e).__name__})，url: {url}, region: {region}, guojia: {guojia}, proxy: {proxy_host}，错误详情: {str(e)}"
+        # 计算实际耗时
+        if 'request_start_time' in locals():
+            elapsed = (time.perf_counter() - request_start_time) * 1000
+        else:
+            elapsed = 0
+        error_message = f"请求异常({type(e).__name__})，url: {url}, region: {region}, guojia: {guojia}, proxy: {proxy_host}，错误详情: {str(e)}, 耗时: {elapsed:.2f}ms"
         _log_error(error_message)
+        # 关闭 session（如果已创建）
+        if 'session' in locals():
+            session.close()
         return {
             "region": region,
             "请求国家": guojia,
@@ -269,7 +322,7 @@ def merge_to_excel():
 # 主控制函数
 # =====================
 def fetch_url_with_timeout():
-    """主请求函数"""
+    """主请求函数（已优化延迟测量准确性）"""
     try:
         df = pd.read_excel("country_pd.xlsx")
         guojia_values = df['Xc'].tolist() or []
@@ -284,7 +337,18 @@ def fetch_url_with_timeout():
     monitor.start()
 
     total_tasks = len(REGIONS) * len(guojia_values) * 1000
-    start_time = time.time()
+    start_time = time.perf_counter()  # 使用高精度计时器
+    
+    # 速率限制相关变量
+    rate_limiter_interval = 1.0 / RATE_LIMIT if RATE_LIMIT > 0 else 0
+    last_request_time = 0
+
+    print(f"\n开始测试...")
+    print(f"总任务数: {total_tasks}")
+    print(f"并发数: {CONCURRENCY}")
+    print(f"速率限制: {RATE_LIMIT if RATE_LIMIT > 0 else '无限制'} req/s")
+    print(f"批次大小: {BATCH_SIZE}")
+    print(f"连接超时: {CONNECT_TIMEOUT}s, 读取超时: {READ_TIMEOUT}s\n")
 
     try:
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
@@ -293,6 +357,14 @@ def fetch_url_with_timeout():
             for region in REGIONS:
                 for guojia in guojia_values:
                     for _ in range(1000):
+                        # 速率限制
+                        if rate_limiter_interval > 0:
+                            current_time = time.perf_counter()
+                            time_since_last = current_time - last_request_time
+                            if time_since_last < rate_limiter_interval:
+                                time.sleep(rate_limiter_interval - time_since_last)
+                            last_request_time = time.perf_counter()
+                        
                         futures.append(
                             executor.submit(
                                 _make_request,
@@ -305,7 +377,7 @@ def fetch_url_with_timeout():
                 result = future.result()
 
                 if i % 100 == 0:
-                    elapsed = time.time() - start_time
+                    elapsed = time.perf_counter() - start_time  # 使用高精度计时器
                     speed = i / elapsed
                     remain = (total_tasks - i) / speed if speed > 0 else 0
                     print(
@@ -334,8 +406,10 @@ def fetch_url_with_timeout():
         merge_to_excel()
 
         total = sum(data["count"] for data in monitor_data.values())
+        elapsed_total = time.perf_counter() - start_time  # 使用高精度计时器
         print(f"\n总处理请求: {total}")
-        print(f"总耗时: {time.time() - start_time:.2f}秒")
+        print(f"总耗时: {elapsed_total:.2f}秒")
+        print(f"平均速度: {total / elapsed_total:.2f} req/s")
 
 # =====================
 # 程序入口
