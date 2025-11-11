@@ -46,44 +46,88 @@
 
 ## 🔧 异步版本配置
 
+### 两种测试模式 ⭐ NEW
+
+异步版本支持两种测试模式：
+
+#### 模式 1: 按国家测试（默认）
+从 `country_pd.xlsx` 文件读取国家列表，针对每个国家在每个区域进行测试。
+
+```python
+USE_REGION_ONLY_MODE = False  # 默认模式
+REQUESTS_PER_COUNTRY = 1000   # 每个国家的请求次数
+```
+
+**适用场景**：需要验证不同国家代理的准确性
+
+#### 模式 2: 区域直接测试 ⭐ NEW
+不依赖国家文件，直接针对每个区域发起指定次数的请求。
+
+```python
+USE_REGION_ONLY_MODE = True   # 启用区域直接模式
+REQUESTS_PER_REGION = 10000   # 每个区域的请求次数
+```
+
+**适用场景**：
+- 不关心具体国家，只测试区域性能
+- 快速大批量测试（无需准备国家文件）
+- 纯性能/延迟测试
+
+**示例计算**：
+- 3个区域 × 10000次 = 30,000 总请求
+- 4个区域 × 50000次 = 200,000 总请求
+
 ### 基本配置
 
 ```python
-REQUESTS_PER_COUNTRY = 1000  # 每个国家的请求次数
+# 通用配置
 CONCURRENCY = 100            # 并发数（异步可以更高）
 RATE_PER_SEC = 0             # 速率限制（0=不限制）
 BATCH_SIZE = 2000            # 批量写入大小
+
+# 模式选择
+USE_REGION_ONLY_MODE = False  # True=区域模式，False=国家模式
+
+# 按国家测试配置
+REQUESTS_PER_COUNTRY = 1000   # 每个国家的请求次数
+
+# 区域直接测试配置
+REQUESTS_PER_REGION = 10000   # 每个区域的请求次数
 ```
 
 ### 推荐配置方案
 
-#### 1. 超大规模测试（100万+请求）
+#### 1. 超大规模测试（100万+请求）- 区域模式 ⭐
 ```python
-REQUESTS_PER_COUNTRY = 5000
+USE_REGION_ONLY_MODE = True
+REQUESTS_PER_REGION = 300000  # 3区域 × 300000 = 900000请求
 CONCURRENCY = 500
 RATE_PER_SEC = 0
 BATCH_SIZE = 5000
 ```
 
-#### 2. 大规模测试（10-100万请求）
+#### 2. 大规模测试（10-100万请求）- 区域模式
 ```python
+USE_REGION_ONLY_MODE = True
+REQUESTS_PER_REGION = 50000   # 3区域 × 50000 = 150000请求
+CONCURRENCY = 300
+RATE_PER_SEC = 0
+BATCH_SIZE = 3000
+```
+
+#### 3. 按国家测试（传统模式）
+```python
+USE_REGION_ONLY_MODE = False
 REQUESTS_PER_COUNTRY = 2000
 CONCURRENCY = 200
 RATE_PER_SEC = 0
 BATCH_SIZE = 3000
 ```
 
-#### 3. 中等规模测试（1-10万请求）
-```python
-REQUESTS_PER_COUNTRY = 1000  # 默认值
-CONCURRENCY = 100
-RATE_PER_SEC = 0
-BATCH_SIZE = 2000
-```
-
 #### 4. 稳定性优先（降低服务器压力）
 ```python
-REQUESTS_PER_COUNTRY = 1000
+USE_REGION_ONLY_MODE = True
+REQUESTS_PER_REGION = 10000
 CONCURRENCY = 50
 RATE_PER_SEC = 100  # 限制每秒100个请求
 BATCH_SIZE = 2000
@@ -101,7 +145,15 @@ pip install aiohttp pandas openpyxl
 
 ### 2. 运行异步版本
 
+#### 按国家测试（默认模式）
 ```bash
+# 确保 USE_REGION_ONLY_MODE = False（默认值）
+python3 2025_03_18_yanchi_ipinfo_async.py
+```
+
+#### 区域直接测试 ⭐ NEW
+```bash
+# 设置 USE_REGION_ONLY_MODE = True
 python3 2025_03_18_yanchi_ipinfo_async.py
 ```
 
@@ -109,6 +161,61 @@ python3 2025_03_18_yanchi_ipinfo_async.py
 
 ```bash
 python3 2025_03_18_yanchi_ipinfo.py
+```
+
+## 🔄 两种模式对比
+
+### 按国家测试模式
+
+**特点**：
+- ✅ 需要 `country_pd.xlsx` 文件
+- ✅ 针对每个国家在每个区域测试
+- ✅ 适合验证不同国家代理准确性
+- ✅ 结果包含"请求国家"和"返回国家"对比
+
+**计算公式**：
+```
+总请求数 = 国家数 × 区域数 × REQUESTS_PER_COUNTRY
+示例: 30国家 × 3区域 × 1000次 = 90,000请求
+```
+
+### 区域直接测试模式 ⭐ NEW
+
+**特点**：
+- ✅ 不需要任何文件，直接配置即可
+- ✅ 针对每个区域直接发起请求
+- ✅ 适合大批量性能测试
+- ✅ 配置简单，启动快速
+
+**计算公式**：
+```
+总请求数 = 区域数 × REQUESTS_PER_REGION
+示例: 3区域 × 50000次 = 150,000请求
+```
+
+**对比表格**：
+
+| 特性 | 按国家模式 | 区域直接模式 ⭐ |
+|------|-----------|----------------|
+| 需要文件 | ✅ country_pd.xlsx | ❌ 不需要 |
+| 配置复杂度 | 中等 | 简单 |
+| 启动速度 | 较慢（读文件） | 快速 |
+| 适用场景 | 国家代理验证 | 大批量测试 |
+| 结果详细度 | 详细（含国家对比） | 简化（仅区域） |
+| 推荐规模 | < 50万请求 | 任意规模 |
+
+### 快速切换示例
+
+在脚本顶部配置区域，只需修改一个参数：
+
+```python
+# 配置 1: 按国家测试（需要 country_pd.xlsx）
+USE_REGION_ONLY_MODE = False
+REQUESTS_PER_COUNTRY = 1000
+
+# 配置 2: 区域直接测试（不需要文件）⭐
+USE_REGION_ONLY_MODE = True
+REQUESTS_PER_REGION = 50000
 ```
 
 ## 🎯 核心优化特性（两版本共有）

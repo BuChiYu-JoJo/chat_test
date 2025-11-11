@@ -55,6 +55,13 @@ CONNECT_TIMEOUT = 10  # 连接超时时间(秒)
 READ_TIMEOUT = 20  # 读取超时时间(秒)
 MONITOR_INTERVAL = 30  # 监控刷新间隔(秒)
 
+# =====================
+# 新增：区域直接测试模式（不依赖国家文件）
+# =====================
+USE_REGION_ONLY_MODE = False  # True=仅按区域测试，False=按国家测试（默认）
+REQUESTS_PER_REGION = 10000  # 区域直接模式：每个区域的请求次数
+# 注意：启用 USE_REGION_ONLY_MODE 后，将忽略 REQUESTS_PER_COUNTRY 和 country_pd.xlsx
+
 # 新增全局输出路径配置
 current_date = datetime.now().strftime("%Y-%m-%d")
 OUTPUT_FOLDER = os.path.join(os.getcwd(), current_date)
@@ -376,6 +383,96 @@ async def schedule_requests(
         print(f"  平均速度: {total_written / elapsed:.2f} req/s")
 
 
+async def schedule_requests_region_mode(
+    total: int, concurrency: int, rate_per_sec: float, regions: list
+):
+    """
+    区域直接测试模式调度请求：
+    - 不使用国家文件，直接对每个区域发起指定次数的请求
+    - 使用 Semaphore 控制最大并发
+    - 使用 await asyncio.sleep(1/rate) 进行速率限制（当 rate_per_sec > 0）
+    """
+    if total <= 0:
+        return
+    if concurrency <= 0:
+        raise ValueError("concurrency must be > 0")
+
+    results_q: asyncio.Queue = asyncio.Queue()
+    sem = asyncio.Semaphore(concurrency)
+
+    # 使用 force_close=True 禁用连接复用，确保每次都是新连接
+    connector = TCPConnector(
+        limit=0,
+        ssl=False,
+        force_close=True,  # 关键：禁用连接复用
+    )
+    
+    # 添加 Connection: close 头部
+    headers = {"Connection": "close"}
+
+    stats: dict = {}
+
+    async with aiohttp.ClientSession(
+        connector=connector, headers=headers
+    ) as session:
+        writer_task = asyncio.create_task(
+            csv_writer(results_q, total, BATCH_SIZE, OUTPUT_FOLDER, stats)
+        )
+        monitor = asyncio.create_task(monitor_task(stats, MONITOR_INTERVAL))
+
+        tasks = []
+        start_time = time.perf_counter()
+        
+        print(f"\n开始测试（异步模式 - 区域直接测试）...")
+        print(f"总任务数: {total}")
+        print(f"每个区域请求次数: {REQUESTS_PER_REGION}")
+        print(f"并发数: {concurrency}")
+        print(f"速率限制: {rate_per_sec if rate_per_sec > 0 else '无限制'} req/s")
+        print(f"批次大小: {BATCH_SIZE}")
+        print(f"连接超时: {CONNECT_TIMEOUT}s, 读取超时: {READ_TIMEOUT}s")
+        print(f"优化: force_close=True (禁用连接复用)")
+        print()
+
+        idx = 0
+        
+        # 区域模式：针对每个区域直接发起请求
+        for region in regions:
+            for _ in range(REQUESTS_PER_REGION):
+                idx += 1
+                
+                # 速率限制
+                if rate_per_sec and rate_per_sec > 0:
+                    await asyncio.sleep(1.0 / rate_per_sec)
+
+                await sem.acquire()
+
+                # 区域模式下，country 参数传空字符串或区域名称
+                t = asyncio.create_task(
+                    worker_task(idx, session, region, "", sem, results_q)
+                )
+                tasks.append(t)
+
+                # 定期清理已完成的任务
+                if len(tasks) > 5000:
+                    tasks = [tt for tt in tasks if not tt.done()]
+
+        # 等待所有任务完成
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 所有 worker 任务完成
+        stats["done"] = True
+        await writer_task
+        await monitor
+
+        elapsed = time.perf_counter() - start_time
+        total_written = stats.get("total", 0)
+        print(f"\n[调度器] 全部请求完成")
+        print(f"  总请求数: {total_written}")
+        print(f"  用时: {elapsed:.2f} 秒")
+        print(f"  平均速度: {total_written / elapsed:.2f} req/s")
+
+
 def read_countries_from_excel(path: str) -> List[str]:
     """从 country_pd.xlsx 读取 Xc 列，返回国家列表"""
     try:
@@ -403,34 +500,66 @@ def read_countries_from_excel(path: str) -> List[str]:
 
 def main():
     """主函数"""
-    # 读取国家列表
-    countries = read_countries_from_excel("country_pd.xlsx")
-
-    if not countries:
-        print("错误: 未能读取到国家列表")
-        return
-
-    # 计算总请求数
-    total = len(countries) * len(REGIONS) * REQUESTS_PER_COUNTRY
-
     print("=" * 60)
     print("代理延迟测试 - 异步优化版本")
     print("=" * 60)
-    print("配置：")
-    print(f"  国家数: {len(countries)}")
-    print(f"  区域数: {len(REGIONS)}")
-    print(f"  每国家每区域请求数: {REQUESTS_PER_COUNTRY}")
-    print(f"  总请求数: {total}")
-    print(f"  并发数: {CONCURRENCY}")
-    print(f"  速率限制: {RATE_PER_SEC if RATE_PER_SEC > 0 else '不限制'} req/s")
-    print(f"  批量写入: {BATCH_SIZE} 条/批次")
-    print(f"  输出目录: {OUTPUT_FOLDER}")
-    print(f"  优化特性: 高精度计时 + 禁用连接复用")
-    print("=" * 60 + "\n")
+    
+    if USE_REGION_ONLY_MODE:
+        # 区域直接测试模式
+        print("模式: 区域直接测试（不使用国家文件）")
+        print("=" * 60)
+        
+        countries = [""]  # 空国家标识，用于区域模式
+        total = len(REGIONS) * REQUESTS_PER_REGION
+        
+        print("配置：")
+        print(f"  测试模式: 区域直接测试")
+        print(f"  区域数: {len(REGIONS)}")
+        print(f"  区域列表: {', '.join(REGIONS)}")
+        print(f"  每区域请求数: {REQUESTS_PER_REGION}")
+        print(f"  总请求数: {total}")
+        print(f"  并发数: {CONCURRENCY}")
+        print(f"  速率限制: {RATE_PER_SEC if RATE_PER_SEC > 0 else '不限制'} req/s")
+        print(f"  批量写入: {BATCH_SIZE} 条/批次")
+        print(f"  输出目录: {OUTPUT_FOLDER}")
+        print(f"  优化特性: 高精度计时 + 禁用连接复用")
+        print("=" * 60 + "\n")
+        
+        asyncio.run(
+            schedule_requests_region_mode(total, CONCURRENCY, RATE_PER_SEC, REGIONS)
+        )
+    else:
+        # 原有的按国家测试模式
+        print("模式: 按国家测试（从 country_pd.xlsx 读取）")
+        print("=" * 60)
+        
+        # 读取国家列表
+        countries = read_countries_from_excel("country_pd.xlsx")
 
-    asyncio.run(
-        schedule_requests(total, CONCURRENCY, RATE_PER_SEC, REGIONS, countries)
-    )
+        if not countries:
+            print("错误: 未能读取到国家列表")
+            print("提示: 如需直接按区域测试，请设置 USE_REGION_ONLY_MODE = True")
+            return
+
+        # 计算总请求数
+        total = len(countries) * len(REGIONS) * REQUESTS_PER_COUNTRY
+
+        print("配置：")
+        print(f"  测试模式: 按国家测试")
+        print(f"  国家数: {len(countries)}")
+        print(f"  区域数: {len(REGIONS)}")
+        print(f"  每国家每区域请求数: {REQUESTS_PER_COUNTRY}")
+        print(f"  总请求数: {total}")
+        print(f"  并发数: {CONCURRENCY}")
+        print(f"  速率限制: {RATE_PER_SEC if RATE_PER_SEC > 0 else '不限制'} req/s")
+        print(f"  批量写入: {BATCH_SIZE} 条/批次")
+        print(f"  输出目录: {OUTPUT_FOLDER}")
+        print(f"  优化特性: 高精度计时 + 禁用连接复用")
+        print("=" * 60 + "\n")
+
+        asyncio.run(
+            schedule_requests(total, CONCURRENCY, RATE_PER_SEC, REGIONS, countries)
+        )
 
 
 if __name__ == "__main__":
